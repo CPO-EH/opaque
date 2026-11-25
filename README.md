@@ -1,5 +1,11 @@
 # OPAQUE
 
+This is a fork of [bytemare/opaque](https://github.com/bytemare/opaque) that adds
+a hybrid post-quantum key exchange (3DH combined with ML-KEM). The classical
+RFC 9807 behavior is unchanged and remains the default. See
+[Post-quantum hybrid mode](#post-quantum-hybrid-mode) for what was added and why.
+The badges below refer to the upstream project.
+
 [![CI](https://github.com/bytemare/opaque/actions/workflows/wf-analysis.yaml/badge.svg)](https://github.com/bytemare/opaque/actions/workflows/wf-analysis.yaml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/bytemare/opaque.svg)](https://pkg.go.dev/github.com/bytemare/opaque)
 [![codecov](https://codecov.io/gh/bytemare/opaque/branch/main/graph/badge.svg?token=5bQfB0OctA)](https://codecov.io/gh/bytemare/opaque)
@@ -41,49 +47,123 @@ comes with no warranty.
 
 You can find the documentation and usage examples in [the package doc](https://pkg.go.dev/github.com/bytemare/opaque).
 
-## Hybrid post-quantum AKE (3DH + ML-KEM)
+## Post-quantum hybrid mode
 
-This fork adds an optional hybrid key exchange: an ephemeral
-[ML-KEM](https://doi.org/10.6028/NIST.FIPS.203) (FIPS 203) exchange is combined
-with 3DH, so session keys stay secret as long as **either** the elliptic curve
-group **or** ML-KEM is unbroken. This protects recorded traffic against a future
-quantum adversary ("harvest now, decrypt later").
+### Why
+
+In RFC 9807, the login key exchange (3DH) relies only on elliptic curve
+Diffie-Hellman. Shor's algorithm breaks the discrete logarithm problem, so an
+attacker who records login traffic today could derive the session keys once a
+large enough quantum computer exists. This is the "harvest now, decrypt later"
+threat, and it matters for any data that has to stay confidential for years.
+
+### What this fork adds
+
+An optional ML-KEM exchange ([FIPS 203](https://doi.org/10.6028/NIST.FIPS.203))
+runs alongside 3DH during login. The client generates a fresh ML-KEM key pair
+for each login, the server encapsulates a secret to it, and that secret is mixed
+into the key derivation together with the three Diffie-Hellman results. An
+attacker has to break both elliptic curve Diffie-Hellman and ML-KEM to recover
+the session key. If ML-KEM turns out to have a flaw, security falls back to
+plain RFC 9807, and if the curve is broken by a quantum computer, ML-KEM still
+protects the session.
+
+ML-KEM comes from the Go standard library (`crypto/mlkem`), so no new
+dependency is needed.
+
+### Usage
 
 ```go
-conf := opaque.DefaultHybridConfiguration() // Ristretto255 + ML-KEM-768
-// or: conf.KEM = opaque.MLKEM768 / opaque.MLKEM1024 on any configuration
+// Ristretto255, SHA-512, Argon2id and ML-KEM-768.
+conf := opaque.DefaultHybridConfiguration()
+
+// Or enable it on any existing configuration.
+conf.KEM = opaque.MLKEM768 // or opaque.MLKEM1024
 ```
 
-How it works:
+The rest of the API is the same. Client and server must use the same `KEM`
+value. Records created during registration do not change, so users registered
+with a classical configuration can log in with the hybrid one without
+registering again.
 
-- KE1 carries the client's ephemeral ML-KEM encapsulation key, appended after
-  the client key share.
-- KE2 carries the server's ML-KEM ciphertext, placed between the server key
-  share and the server MAC.
-- The KEM shared secret is appended to the 3DH input keying material:
-  `IKM = DH1 || DH2 || DH3 || ss_KEM`.
-- The ciphertext is added to the transcript, which also covers the KEM key since
-  KE1 is hashed. The transcript prefix becomes
-  `OPAQUEv1-Hybrid-ML-KEM-768-`, which keeps it separate from RFC 9807.
-- Registration and stored records are unchanged, because the KEM is purely
-  ephemeral. Existing records work in hybrid mode.
-- Message overhead is +1184 B for KE1 and +1088 B for KE2 (ML-KEM-768), or
-  +1568 B for each with ML-KEM-1024.
-- To resume a login on another client instance, also pass
-  `AKEOptions.KEMSeed`, the 64-byte seed of the ephemeral decapsulation key.
+Because this fork keeps the module path `github.com/bytemare/opaque`, point Go
+to it with a replace directive:
 
-Limitations (read before deploying):
+```shell
+go mod edit -replace github.com/bytemare/opaque=github.com/CPO-EH/opaque@main
+go mod tidy
+```
 
-- **Not RFC 9807.** Hybrid peers cannot talk to RFC 9807 implementations or to
-  classical peers. Both sides need the same `KEM` setting.
-- **Authentication is still classical.** A quantum adversary active *during*
-  a login could impersonate the server using its static DH key. Mutual
-  authentication still relies on the static DH keys and the MACs.
-- **The OPRF is still classical.** A quantum adversary that sees a login
-  transcript and holds or recovers the server's OPRF key could run an offline
-  dictionary attack on the password. Replacing the OPRF with a post-quantum one
-  is future work.
+### Protocol changes
+
+These changes only apply when a KEM is set. With `KEM` left at `NoKEM`, the
+messages and transcripts are byte for byte the same as RFC 9807, and the RFC
+test vectors still pass.
+
+- KE1 ends with the client's ephemeral ML-KEM encapsulation key, after the
+  client key share.
+- KE2 contains the ML-KEM ciphertext between the server key share and the
+  server MAC.
+- The input keying material becomes `DH1 || DH2 || DH3 || ss_KEM`.
+- The ciphertext is appended to the transcript hash. The encapsulation key is
+  already covered because KE1 is hashed in full. Both MACs therefore
+  authenticate the KEM exchange, and a substituted key or ciphertext makes the
+  login fail.
+- The transcript prefix changes from `OPAQUEv1-` to
+  `OPAQUEv1-Hybrid-ML-KEM-768-` (or `-ML-KEM-1024-`), so a hybrid transcript can
+  never be mistaken for a classical one.
+- When a KEM is set, the serialized `Configuration` gets one extra byte at the
+  end. Configurations serialized before this change still decode.
+- The server validates the encapsulation key as required by FIPS 203 before
+  using it.
+
+Message sizes grow as follows:
+
+| Parameter set | KE1     | KE2     |
+|---------------|---------|---------|
+| ML-KEM-768    | +1184 B | +1088 B |
+| ML-KEM-1024   | +1568 B | +1568 B |
+
+Registration messages are unchanged.
+
+### Session resumption
+
+If a login is started on one client instance and finished on another, the
+second instance needs the 64-byte seed of the ML-KEM key in addition to the
+values already required. Pass it in `AKEOptions.KEMSeed` for both
+`GenerateKE1` and `GenerateKE3`. Treat it with the same care as the ephemeral
+secret key share. `Client.ClearState()` wipes it.
+
+### Tests
+
+`tests/hybrid_test.go` runs every case on all supported groups with both
+ML-KEM-768 and ML-KEM-1024. It covers:
+
+- full registration and login, with matching session keys on both sides
+- message sizes
+- a tampered ciphertext and a substituted encapsulation key, both rejected
+- mixing hybrid and classical peers, which is refused
+- malformed encapsulation keys
+- session resumption, including a missing, duplicated or wrong-length seed
+- configuration encoding and decoding
+
+### Limitations
+
+This mode protects the confidentiality of past sessions. It does not make the
+whole protocol post-quantum.
+
+- It is not part of RFC 9807. Hybrid peers cannot talk to RFC 9807
+  implementations or to classical peers.
+- Authentication still relies on the static elliptic curve keys. An attacker
+  with a quantum computer who is active during a login could impersonate the
+  server.
+- The OPRF is still based on elliptic curves. An attacker with a quantum
+  computer who obtains a login transcript and the server's OPRF key could run
+  an offline dictionary attack on the password.
 - The construction has not been formally analyzed or audited.
+
+Planned next steps are post-quantum authentication, using a static KEM key for
+the server in the style of KEMTLS, and a post-quantum OPRF.
 
 ## Security and Operational Notes
 
@@ -112,11 +192,11 @@ Limitations (read before deploying):
 available, see the [tags on the repository](https://github.com/bytemare/opaque/tags).
 
 ## Release Integrity (SLSA Level 3)
-Releases are built with the reusable [bytemare/slsa](https://github.com/bytemare/slsa) workflow and ship the evidence required for SLSA Level 3 compliance:
+This section describes the upstream bytemare/opaque releases, not this fork. Upstream releases are built with the reusable [bytemare/slsa](https://github.com/bytemare/slsa) workflow and ship the evidence required for SLSA Level 3 compliance:
 
-- 📦 Artifacts are uploaded to the release page, and include the deterministic source archive plus subjects.sha256, signed SBOM (sbom.cdx.json), GitHub provenance (*.intoto.jsonl), a reproducibility report (verification.json), and a signed Verification Summary Attestation (verification-summary.attestation.json[.bundle]).
-- ✍️ All artifacts are signed using [Sigstore](https://sigstore.dev) with transparency via [Rekor](https://rekor.sigstore.dev).
-- ✅ Verification (or see the latest docs at [bytemare/slsa](https://github.com/bytemare/slsa)):
+- Artifacts are uploaded to the release page, and include the deterministic source archive plus subjects.sha256, signed SBOM (sbom.cdx.json), GitHub provenance (*.intoto.jsonl), a reproducibility report (verification.json), and a signed Verification Summary Attestation (verification-summary.attestation.json[.bundle]).
+- All artifacts are signed using [Sigstore](https://sigstore.dev) with transparency via [Rekor](https://rekor.sigstore.dev).
+- Verification (or see the latest docs at [bytemare/slsa](https://github.com/bytemare/slsa)):
 ```shell
 curl -sSL https://raw.githubusercontent.com/bytemare/slsa/main/verify-release.sh -o verify-release.sh
 chmod +x verify-release.sh
