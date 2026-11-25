@@ -12,6 +12,7 @@ package kem
 
 import (
 	"crypto/mlkem"
+	"crypto/mlkem/mlkemtest"
 	"errors"
 )
 
@@ -35,6 +36,9 @@ const (
 
 	// SharedSecretSize is the size of the shared secret produced by encapsulation.
 	SharedSecretSize = mlkem.SharedKeySize
+
+	// EncapsulationRandomnessSize is the size of the randomness used by derandomized encapsulation.
+	EncapsulationRandomnessSize = 32
 )
 
 var (
@@ -151,6 +155,29 @@ func (i ID) Encapsulate(ek []byte) (sharedSecret, ciphertext []byte, err error) 
 		sharedSecret, ciphertext = k.Encapsulate()
 
 		return sharedSecret, ciphertext, nil
+	default:
+		return nil, nil, errUnknownKEM
+	}
+}
+
+// EncapsulateDerand is the derandomized encapsulation (ML-KEM.Encaps_internal in FIPS 203), using the provided 32
+// bytes of randomness. It must only be used to produce or check known-answer test vectors.
+func (i ID) EncapsulateDerand(ek, randomness []byte) (sharedSecret, ciphertext []byte, err error) {
+	switch i {
+	case MLKEM768:
+		k, err := mlkem.NewEncapsulationKey768(ek)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return mlkemtest.Encapsulate768(k, randomness)
+	case MLKEM1024:
+		k, err := mlkem.NewEncapsulationKey1024(ek)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return mlkemtest.Encapsulate1024(k, randomness)
 	default:
 		return nil, nil, errUnknownKEM
 	}

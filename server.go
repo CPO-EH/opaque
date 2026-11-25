@@ -182,6 +182,7 @@ func newServerInputs() *serverInputs {
 		MaskingNonce:   nil,
 		SecretKeyShare: nil,
 		AKENonce:       nil,
+		KEMRandomness:  nil,
 	}
 }
 
@@ -233,8 +234,13 @@ func (s *Server) coreGenerateKE2(
 	if s.conf.KEM.Enabled() {
 		var err error
 
-		kemSecret, ke2.ServerKEMCiphertext, err = s.conf.KEM.Encapsulate(ke1.ClientKEMKey)
-		if err != nil { // never reached, since validateKE1 already verified the key.
+		if inputs.KEMRandomness != nil {
+			kemSecret, ke2.ServerKEMCiphertext, err = s.conf.KEM.EncapsulateDerand(ke1.ClientKEMKey, inputs.KEMRandomness)
+		} else {
+			kemSecret, ke2.ServerKEMCiphertext, err = s.conf.KEM.Encapsulate(ke1.ClientKEMKey)
+		}
+
+		if err != nil { // never reached, since validateKE1 and the options already verified the inputs.
 			return nil, nil, ErrKE1.Join(internal.ErrInvalidClientKEMKey, err)
 		}
 
@@ -318,6 +324,7 @@ type serverInputs struct {
 	MaskingNonce   []byte
 	SecretKeyShare *ecc.Scalar
 	AKENonce       []byte
+	KEMRandomness  []byte
 }
 
 func (s *Server) verifyRecord(record *ClientRecord) error {

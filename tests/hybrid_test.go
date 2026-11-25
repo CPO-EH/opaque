@@ -431,6 +431,38 @@ func TestHybrid_KE1InvalidKEMSeedOption(t *testing.T) {
 	}
 }
 
+// TestHybrid_KEMRandomnessOption verifies the server rejects derandomized encapsulation input of the wrong length, and
+// that a fixed randomness makes KE2 reproducible.
+func TestHybrid_KEMRandomnessOption(t *testing.T) {
+	conf := hybridConf(opaque.DefaultConfiguration(), opaque.MLKEM768)
+	env := newHybridEnv(t, conf)
+	client, _ := conf.Client()
+	ke1, _ := client.GenerateKE1(password)
+
+	_, _, err := env.server.GenerateKE2(ke1, env.record, &opaque.ServerOptions{
+		AKE: &opaque.AKEOptions{KEMRandomness: make([]byte, 31)},
+	})
+	if !errors.Is(err, internal.ErrInvalidKEMRandomness) {
+		t.Fatalf("expected invalid KEM randomness error, got %v", err)
+	}
+
+	opts := &opaque.ServerOptions{AKE: &opaque.AKEOptions{KEMRandomness: bytes.Repeat([]byte{7}, 32)}}
+
+	a, _, err := env.server.GenerateKE2(ke1, env.record, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b, _, err := env.server.GenerateKE2(ke1, env.record, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(a.ServerKEMCiphertext, b.ServerKEMCiphertext) {
+		t.Fatal("fixed KEM randomness must give the same ciphertext")
+	}
+}
+
 // TestHybrid_ClearState verifies ClearState wipes the KEM seed, so KE3 cannot be computed afterwards.
 func TestHybrid_ClearState(t *testing.T) {
 	conf := hybridConf(opaque.DefaultConfiguration(), opaque.MLKEM768)

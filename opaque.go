@@ -357,11 +357,16 @@ func IsValidElement(g ecc.Group, e *ecc.Element) error {
 // KEMSeed is only used by the client in hybrid mode: it is the 64-byte seed of the ephemeral ML-KEM decapsulation key.
 // It can be set in GenerateKE1 to fix the KEM key, and must be set in GenerateKE3 to resume a session from a different
 // client instance. It is as sensitive as the ephemeral secret key share. It is ignored by the server.
+//
+// KEMRandomness is only used by the server in hybrid mode: when set, the ML-KEM encapsulation is derandomized with
+// these 32 bytes (ML-KEM.Encaps_internal in FIPS 203). It exists to reproduce test vectors and must never be set in
+// production, since reusing it reveals the KEM shared secret. It is ignored by the client.
 type AKEOptions struct {
 	SecretKeyShare     *ecc.Scalar
 	SecretKeyShareSeed []byte
 	Nonce              []byte
 	KEMSeed            []byte
+	KEMRandomness      []byte
 }
 
 // verify returns an error on the first non-compliant parameter, nil otherwise.

@@ -83,6 +83,15 @@ func (s *Server) resolveServerInputs(options []*ServerOptions) (*serverInputs, e
 		return nil, ErrServerOptions.Join(err)
 	}
 
+	// Derandomized KEM encapsulation, for test vectors only.
+	if len(options[0].AKE.KEMRandomness) != 0 && s.conf.KEM.Enabled() {
+		if len(options[0].AKE.KEMRandomness) != kem.EncapsulationRandomnessSize {
+			return nil, ErrServerOptions.Join(internal.ErrInvalidKEMRandomness)
+		}
+
+		inputs.KEMRandomness = slices.Clone(options[0].AKE.KEMRandomness)
+	}
+
 	return inputs, nil
 }
 

@@ -96,6 +96,10 @@ go mod tidy
 
 ### Protocol changes
 
+The full specification, precise enough to write a compatible implementation in
+another language, is in [docs/hybrid-mlkem.md](docs/hybrid-mlkem.md). This is
+a summary.
+
 These changes only apply when a KEM is set. With `KEM` left at `NoKEM`, the
 messages and transcripts are byte for byte the same as RFC 9807, and the RFC
 test vectors still pass.
@@ -146,6 +150,29 @@ ML-KEM-768 and ML-KEM-1024. It covers:
 - malformed encapsulation keys
 - session resumption, including a missing, duplicated or wrong-length seed
 - configuration encoding and decoding
+
+### Test vectors
+
+[tests/hybrid_vectors.json](tests/hybrid_vectors.json) contains 8 test vectors
+(ristretto255 and P-256, with and without explicit identities, each with
+ML-KEM-768 and ML-KEM-1024). They reuse the inputs of the RFC 9807 vectors and
+add a fixed ML-KEM seed for the client and fixed encapsulation randomness for
+the server, so every message and key is reproducible. Another implementation
+is compatible if it produces the same bytes. Section 8 of the specification
+describes the format.
+
+`tests/hybrid_vectors_test.go` checks the vectors in two ways: the library
+must reproduce them, and a separate computation of the key schedule written
+from the specification, using only the Go standard library, must agree with
+them. To regenerate the file:
+
+```shell
+go test ./tests -run TestHybridVectors -update-hybrid-vectors
+```
+
+The server option `AKEOptions.KEMRandomness` exists only to produce these
+vectors. Never set it in production: anyone who knows that value can compute
+the KEM shared secret.
 
 ### Limitations
 

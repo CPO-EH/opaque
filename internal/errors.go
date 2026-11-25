@@ -219,6 +219,9 @@ var (
 	// ErrInvalidKEMSeed indicates that the provided KEM seed has an invalid length.
 	ErrInvalidKEMSeed = errors.New("invalid KEM seed length")
 
+	// ErrInvalidKEMRandomness indicates that the provided KEM encapsulation randomness has an invalid length.
+	ErrInvalidKEMRandomness = errors.New("invalid KEM encapsulation randomness length")
+
 	// ErrKE1Missing indicates that the KE1 message is missing in the client state and options.
 	ErrKE1Missing = errors.New("no KE1 message in state or options. " + restartAuthProtocol)
 
