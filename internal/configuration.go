@@ -17,6 +17,7 @@ import (
 
 	"github.com/bytemare/ecc"
 
+	"github.com/bytemare/opaque/internal/kem"
 	"github.com/bytemare/opaque/internal/ksf"
 	"github.com/bytemare/opaque/internal/oprf"
 	"github.com/bytemare/opaque/internal/tag"
@@ -59,6 +60,9 @@ type Sizes struct {
 	KE1                  int
 	KE2                  int
 	KE3                  int
+	// KEMEncapsulationKey and KEMCiphertext are 0 when no post-quantum KEM is used.
+	KEMEncapsulationKey int
+	KEMCiphertext       int
 }
 
 // Configuration is the internal representation of the instance runtime parameters.
@@ -70,6 +74,7 @@ type Configuration struct {
 	Context []byte
 	Hash    crypto.Hash
 	Group   ecc.Group
+	KEM     kem.ID
 	Sizes   Sizes
 }
 
@@ -122,6 +127,30 @@ func NewConfiguration(
 		Group:   group,
 		Sizes:   sizes,
 	}
+}
+
+// EnableKEM switches the AKE to the hybrid 3DH + KEM mode and updates the message sizes accordingly.
+// Passing kem.None leaves the configuration unchanged.
+func (c *Configuration) EnableKEM(id kem.ID) {
+	if !id.Enabled() {
+		return
+	}
+
+	c.KEM = id
+	c.Sizes.KEMEncapsulationKey = id.EncapsulationKeySize()
+	c.Sizes.KEMCiphertext = id.CiphertextSize()
+	c.Sizes.KE1 += c.Sizes.KEMEncapsulationKey
+	c.Sizes.KE2 += c.Sizes.KEMCiphertext
+}
+
+// VersionTag returns the AKE transcript prefix. The hybrid mode uses a distinct prefix bound to the KEM, providing
+// domain separation from the RFC 9807 3DH transcripts.
+func (c *Configuration) VersionTag() []byte {
+	if !c.KEM.Enabled() {
+		return []byte(tag.VersionTag)
+	}
+
+	return []byte(tag.HybridVersionTag + c.KEM.String() + "-")
 }
 
 // NewHash returns a fresh hashing state for one protocol operation.

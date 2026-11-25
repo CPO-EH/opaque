@@ -20,11 +20,16 @@ type KE1 struct {
 	CredentialRequest
 	ClientKeyShare *ecc.Element `json:"clientKeyShare"`
 	ClientNonce    []byte       `json:"clientNonce"`
+	// ClientKEMKey is the client's ephemeral post-quantum KEM encapsulation key. It is only set in hybrid mode.
+	ClientKEMKey []byte `json:"clientKemKey,omitempty"`
 }
 
 // Serialize returns the byte encoding of KE1.
 func (m *KE1) Serialize() []byte {
-	return encoding.Concat3(m.CredentialRequest.Serialize(), m.ClientNonce, m.ClientKeyShare.Encode())
+	return encoding.Concat(
+		encoding.Concat3(m.CredentialRequest.Serialize(), m.ClientNonce, m.ClientKeyShare.Encode()),
+		m.ClientKEMKey,
+	)
 }
 
 // KE2 is the second message of the login flow, created by the server and sent to the client.
@@ -33,13 +38,17 @@ type KE2 struct {
 	ServerKeyShare *ecc.Element `json:"serverKeyShare"`
 	ServerNonce    []byte       `json:"serverNonce"`
 	ServerMac      []byte       `json:"serverMac"`
+	// ServerKEMCiphertext is the post-quantum KEM ciphertext encapsulated to the client's KEM key. It is only set in
+	// hybrid mode.
+	ServerKEMCiphertext []byte `json:"serverKemCiphertext,omitempty"`
 }
 
 // Serialize returns the byte encoding of KE2.
 func (m *KE2) Serialize() []byte {
-	return encoding.Concat(
+	return encoding.Concat3(
 		m.CredentialResponse.Serialize(),
-		encoding.Concat3(m.ServerNonce, m.ServerKeyShare.Encode(), m.ServerMac),
+		encoding.Concat3(m.ServerNonce, m.ServerKeyShare.Encode(), m.ServerKEMCiphertext),
+		m.ServerMac,
 	)
 }
 

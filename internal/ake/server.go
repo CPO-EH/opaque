@@ -15,7 +15,8 @@ import (
 	"github.com/bytemare/opaque/message"
 )
 
-// Respond produces a 3DH server response message.
+// Respond produces a 3DH server response message. In hybrid mode, ke2 must already hold the KEM ciphertext and
+// kemSecret the encapsulated shared secret; both are nil otherwise.
 func Respond(
 	conf *internal.Configuration,
 	secretKey, ephemeralSecretKey *ecc.Scalar,
@@ -23,6 +24,7 @@ func Respond(
 	clientPublicKey *ecc.Element,
 	ke2 *message.KE2,
 	ke1 *message.KE1,
+	kemSecret []byte,
 ) (clientMac, sessionSecret []byte) {
 	ikm := k3dh(
 		ke1.ClientKeyShare,
@@ -31,6 +33,7 @@ func Respond(
 		secretKey,
 		clientPublicKey,
 		ephemeralSecretKey,
+		kemSecret,
 	)
 	sessionSecret, serverMac, clientMac := core3DH(conf, identities, ikm, ke1.Serialize(), ke2)
 

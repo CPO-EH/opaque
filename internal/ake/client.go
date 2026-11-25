@@ -15,8 +15,9 @@ import (
 	"github.com/bytemare/opaque/message"
 )
 
-// Start initiates the 3DH protocol, and returns a KE1 message with clientInfo.
-func Start(g ecc.Group, esk *ecc.Scalar, nonce []byte) *message.KE1 {
+// Start initiates the 3DH protocol, and returns a KE1 message with clientInfo. kemKey is the client's ephemeral KEM
+// encapsulation key in hybrid mode, and nil otherwise.
+func Start(g ecc.Group, esk *ecc.Scalar, nonce, kemKey []byte) *message.KE1 {
 	epk := g.Base().Multiply(esk)
 
 	return &message.KE1{
@@ -25,11 +26,13 @@ func Start(g ecc.Group, esk *ecc.Scalar, nonce []byte) *message.KE1 {
 		},
 		ClientNonce:    nonce,
 		ClientKeyShare: epk,
+		ClientKEMKey:   kemKey,
 	}
 }
 
 // Finalize verifies and responds to KE2. If the handshake is successful, this functions
-// returns a KE3 message and the session secret.
+// returns a KE3 message and the session secret. kemSecret is the decapsulated KEM shared secret in hybrid mode, and nil
+// otherwise.
 func Finalize(
 	conf *internal.Configuration,
 	secretKey, ephemeralSecretKey *ecc.Scalar,
@@ -37,6 +40,7 @@ func Finalize(
 	serverPublicKey *ecc.Element,
 	ke2 *message.KE2,
 	ke1 []byte,
+	kemSecret []byte,
 ) (*message.KE3, []byte, bool) {
 	ikm := k3dh(
 		ke2.ServerKeyShare,
@@ -45,6 +49,7 @@ func Finalize(
 		ephemeralSecretKey,
 		ke2.ServerKeyShare,
 		secretKey,
+		kemSecret,
 	)
 	sessionSecret, serverMac, clientMac := core3DH(conf, identities, ikm, ke1, ke2)
 

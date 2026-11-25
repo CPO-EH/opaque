@@ -24,6 +24,7 @@ import (
 	"github.com/bytemare/opaque/internal"
 	"github.com/bytemare/opaque/internal/ake"
 	"github.com/bytemare/opaque/internal/encoding"
+	"github.com/bytemare/opaque/internal/kem"
 	"github.com/bytemare/opaque/internal/oprf"
 	"github.com/bytemare/opaque/message"
 
@@ -69,10 +70,38 @@ func (g Group) Group() ecc.Group {
 	return ecc.Group(g)
 }
 
+// KEM identifies the post-quantum key encapsulation mechanism combined with 3DH in the hybrid AKE mode.
+type KEM byte
+
+const (
+	// NoKEM disables the post-quantum KEM: the AKE is plain RFC 9807 3DH. This is the default.
+	NoKEM = KEM(kem.None)
+
+	// MLKEM768 enables the hybrid 3DH + ML-KEM-768 (FIPS 203) AKE. This is the recommended post-quantum setting.
+	MLKEM768 = KEM(kem.MLKEM768)
+
+	// MLKEM1024 enables the hybrid 3DH + ML-KEM-1024 (FIPS 203) AKE.
+	MLKEM1024 = KEM(kem.MLKEM1024)
+)
+
+// Available returns whether the KEM identifier is recognized. NoKEM is valid.
+func (k KEM) Available() bool {
+	return k == NoKEM || kem.ID(k).Available()
+}
+
+// String returns the KEM name.
+func (k KEM) String() string {
+	return kem.ID(k).String()
+}
+
 const confIDsLength = 6
 
 // Configuration represents an OPAQUE configuration. OPRF and AKE can use different groups.
 // Matching KDF, MAC, and Hash selections remain recommended but are not required.
+//
+// Setting KEM to MLKEM768 or MLKEM1024 enables the hybrid post-quantum AKE: an ephemeral ML-KEM exchange is added to
+// 3DH, so session keys stay secret against an adversary that records traffic today and later gains a quantum computer.
+// This mode is not part of RFC 9807 and is not interoperable with RFC 9807 implementations.
 type Configuration struct {
 	Context []byte
 	KDF     crypto.Hash    `json:"kdf"`
@@ -81,6 +110,7 @@ type Configuration struct {
 	KSF     ksf.Identifier `json:"ksf"`
 	OPRF    Group          `json:"oprf"`
 	AKE     Group          `json:"group"`
+	KEM     KEM            `json:"kem,omitempty"`
 }
 
 // DefaultConfiguration returns a default configuration with strong parameters.
@@ -92,8 +122,17 @@ func DefaultConfiguration() *Configuration {
 		KDF:     crypto.SHA512,
 		MAC:     crypto.SHA512,
 		Hash:    crypto.SHA512,
+		KEM:     NoKEM,
 		Context: nil,
 	}
+}
+
+// DefaultHybridConfiguration returns the default configuration with the hybrid 3DH + ML-KEM-768 post-quantum AKE.
+func DefaultHybridConfiguration() *Configuration {
+	c := DefaultConfiguration()
+	c.KEM = MLKEM768
+
+	return c
 }
 
 // Equals compares two configurations and returns nil if they are equal, or an error otherwise.
@@ -124,6 +163,10 @@ func (c *Configuration) Equals(other *Configuration) error {
 
 	if c.AKE != other.AKE {
 		return fmt.Errorf("%w: AKE mismatch", ErrCodeConfiguration)
+	}
+
+	if c.KEM != other.KEM {
+		return fmt.Errorf("%w: KEM mismatch", ErrCodeConfiguration)
 	}
 
 	if !bytes.Equal(c.Context, other.Context) {
@@ -164,7 +207,8 @@ func (c *Configuration) Deserializer() (*Deserializer, error) {
 	return &Deserializer{conf: conf}, nil
 }
 
-// Serialize returns the byte encoding of the Configuration structure.
+// Serialize returns the byte encoding of the Configuration structure. For backwards compatibility, the KEM identifier
+// is appended as a single trailing byte only if a KEM is enabled.
 func (c *Configuration) Serialize() []byte {
 	ids := []byte{
 		byte(c.OPRF),
@@ -175,7 +219,12 @@ func (c *Configuration) Serialize() []byte {
 		byte(c.Hash),
 	}
 
-	return encoding.Concatenate(ids, encoding.EncodeVector(c.Context))
+	out := encoding.Concatenate(ids, encoding.EncodeVector(c.Context))
+	if c.KEM != NoKEM {
+		out = append(out, byte(c.KEM))
+	}
+
+	return out
 }
 
 // DeserializeConfiguration decodes the input and returns a Parameter structure.
@@ -185,9 +234,22 @@ func DeserializeConfiguration(encoded []byte) (*Configuration, error) {
 		return nil, ErrConfiguration.Join(internal.ErrInvalidEncodingLength)
 	}
 
-	ctx, _, err := encoding.DecodeVector(encoded[confIDsLength:])
+	ctx, offset, err := encoding.DecodeVector(encoded[confIDsLength:])
 	if err != nil {
 		return nil, ErrConfiguration.Join(internal.ErrInvalidContextEncoding, err)
+	}
+
+	kemID := NoKEM
+
+	switch trailing := encoded[confIDsLength+offset:]; len(trailing) {
+	case 0:
+	case 1:
+		kemID = KEM(trailing[0])
+		if kemID == NoKEM { // non-canonical encoding: NoKEM is never serialized.
+			return nil, ErrConfiguration.Join(internal.ErrInvalidKEMid)
+		}
+	default:
+		return nil, ErrConfiguration.Join(internal.ErrInvalidEncodingLength)
 	}
 
 	c := &Configuration{
@@ -197,6 +259,7 @@ func DeserializeConfiguration(encoded []byte) (*Configuration, error) {
 		KDF:     crypto.Hash(encoded[3]),
 		MAC:     crypto.Hash(encoded[4]),
 		Hash:    crypto.Hash(encoded[5]),
+		KEM:     kemID,
 		Context: ctx,
 	}
 
@@ -290,10 +353,15 @@ func IsValidElement(g ecc.Group, e *ecc.Element) error {
 // AKEOptions override the secure default values or internally generated values. Only use this if you know what you're
 // doing. Reusing seeds and nonces across sessions is a security risk, and breaks forward secrecy.
 // If the SecretKeyShare is provided, SecretKeyShareSeed is ignored.
+//
+// KEMSeed is only used by the client in hybrid mode: it is the 64-byte seed of the ephemeral ML-KEM decapsulation key.
+// It can be set in GenerateKE1 to fix the KEM key, and must be set in GenerateKE3 to resume a session from a different
+// client instance. It is as sensitive as the ephemeral secret key share. It is ignored by the server.
 type AKEOptions struct {
 	SecretKeyShare     *ecc.Scalar
 	SecretKeyShareSeed []byte
 	Nonce              []byte
+	KEMSeed            []byte
 }
 
 // verify returns an error on the first non-compliant parameter, nil otherwise.
@@ -304,6 +372,10 @@ func (c *Configuration) verify() error {
 
 	if !c.AKE.Available() || !c.AKE.Group().Available() {
 		return ErrConfiguration.Join(internal.ErrInvalidAKEid)
+	}
+
+	if !c.KEM.Available() {
+		return ErrConfiguration.Join(internal.ErrInvalidKEMid)
 	}
 
 	if !internal.IsHashFunctionValid(c.KDF) {
@@ -343,7 +415,7 @@ func (c *Configuration) toInternal() (*internal.Configuration, error) {
 		ksfid = internalKSF.IdentityKSF(0)
 	}
 
-	return internal.NewConfiguration(
+	conf := internal.NewConfiguration(
 		c.OPRF.OPRF(),
 		c.AKE.Group(),
 		ksfid,
@@ -351,7 +423,10 @@ func (c *Configuration) toInternal() (*internal.Configuration, error) {
 		c.MAC,
 		c.Hash,
 		c.Context,
-	), nil
+	)
+	conf.EnableKEM(kem.ID(c.KEM))
+
+	return conf, nil
 }
 
 // getSecretKeyShare assumes either SecretKeyShare is set or SecretKeyShareSeed is != 0.

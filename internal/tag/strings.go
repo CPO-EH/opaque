@@ -47,6 +47,10 @@ const (
 	// VersionTag indicates the protocol RFC identifier for the AKE transcript prefix.
 	VersionTag = "OPAQUEv1-"
 
+	// HybridVersionTag is the AKE transcript prefix of the hybrid 3DH + post-quantum KEM mode (not part of RFC 9807).
+	// The KEM name and a dash are appended to it.
+	HybridVersionTag = "OPAQUEv1-Hybrid-"
+
 	// LabelPrefix is the 3DH secret KDF dst prefix.
 	LabelPrefix = "OPAQUE-"
 

@@ -35,6 +35,9 @@ var (
 	// ErrInvalidAKEid indicates that the provided AKE group identifier is invalid.
 	ErrInvalidAKEid = errors.New("invalid AKE group id")
 
+	// ErrInvalidKEMid indicates that the provided post-quantum KEM identifier is invalid.
+	ErrInvalidKEMid = errors.New("invalid KEM id")
+
 	// ErrHashSizeExceedsMACBlockSize indicates that the selected Hash output size does not fit the MAC block-size policy.
 	ErrHashSizeExceedsMACBlockSize = errors.New("hash output size exceeds MAC block size")
 
@@ -165,6 +168,9 @@ var (
 
 	// ErrInvalidServerKeyShare indicates the provided ephemeral server public key is invalid.
 	ErrInvalidServerKeyShare = errors.New("invalid server key share")
+
+	// ErrInvalidServerKEMCiphertext indicates the KEM ciphertext in KE2 is missing, invalid, or unexpected.
+	ErrInvalidServerKEMCiphertext = errors.New("invalid server KEM ciphertext")
 )
 
 // Client options errors.
@@ -201,6 +207,17 @@ var (
 	// and misuse of the library.
 	ErrClientExistingKeyShare = errors.New("an AKE secret key share exists in the client state, but there's also one" +
 		" provided in the options, but only one must be set. It doesn't look like you know what you're doing")
+
+	// ErrClientNoKEMSeed indicates that the client state and options do not contain the ephemeral KEM seed in hybrid
+	// mode, which indicates no prior run of the GenerateKE1 method.
+	ErrClientNoKEMSeed = errors.New("no KEM seed in state or options. " + restartAuthProtocol)
+
+	// ErrClientExistingKEMSeed indicates that the client state already contains a KEM seed, but one was also provided
+	// in the options.
+	ErrClientExistingKEMSeed = errors.New("a KEM seed exists in the client state, but there's also one in the options")
+
+	// ErrInvalidKEMSeed indicates that the provided KEM seed has an invalid length.
+	ErrInvalidKEMSeed = errors.New("invalid KEM seed length")
 
 	// ErrKE1Missing indicates that the KE1 message is missing in the client state and options.
 	ErrKE1Missing = errors.New("no KE1 message in state or options. " + restartAuthProtocol)
@@ -272,6 +289,9 @@ var (
 
 	// ErrInvalidClientKeyShare indicates the provided ephemeral client public key is invalid.
 	ErrInvalidClientKeyShare = errors.New("invalid client key share")
+
+	// ErrInvalidClientKEMKey indicates the KEM encapsulation key in KE1 is missing, invalid, or unexpected.
+	ErrInvalidClientKEMKey = errors.New("invalid client KEM encapsulation key")
 )
 
 // RegistrationResponse related errors.

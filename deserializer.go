@@ -122,10 +122,20 @@ func (d *Deserializer) KE1(ke1 []byte) (*message.KE1, error) {
 		return nil, ErrKE1.Join(internal.ErrInvalidClientKeyShare, err)
 	}
 
+	var kemKey []byte
+
+	if d.conf.KEM.Enabled() {
+		kemKey = ke1[offset+d.conf.Sizes.AKEElement:]
+		if err = d.conf.KEM.ValidateEncapsulationKey(kemKey); err != nil {
+			return nil, ErrKE1.Join(internal.ErrInvalidClientKEMKey, err)
+		}
+	}
+
 	return &message.KE1{
 		CredentialRequest: *request,
 		ClientNonce:       nonceU,
 		ClientKeyShare:    epku,
+		ClientKEMKey:      kemKey,
 	}, nil
 }
 
@@ -155,6 +165,13 @@ func (d *Deserializer) KE2(ke2 []byte) (*message.KE2, error) {
 	offset := d.conf.Sizes.CredentialResponse + d.conf.Sizes.Nonce
 	epk := ke2[offset : offset+d.conf.Sizes.AKEElement]
 	offset += d.conf.Sizes.AKEElement
+
+	var kemCiphertext []byte
+	if d.conf.KEM.Enabled() {
+		kemCiphertext = ke2[offset : offset+d.conf.Sizes.KEMCiphertext]
+		offset += d.conf.Sizes.KEMCiphertext
+	}
+
 	mac := ke2[offset:]
 
 	epks, err := DeserializeElement(d.conf.Group, epk)
@@ -171,10 +188,11 @@ func (d *Deserializer) KE2(ke2 []byte) (*message.KE2, error) {
 	}
 
 	return &message.KE2{
-		CredentialResponse: cresp,
-		ServerNonce:        nonceS,
-		ServerKeyShare:     epks,
-		ServerMac:          mac,
+		CredentialResponse:  cresp,
+		ServerNonce:         nonceS,
+		ServerKeyShare:      epks,
+		ServerMac:           mac,
+		ServerKEMCiphertext: kemCiphertext,
 	}, nil
 }
 

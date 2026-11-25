@@ -15,6 +15,7 @@ import (
 	"github.com/bytemare/ecc"
 
 	"github.com/bytemare/opaque/internal"
+	"github.com/bytemare/opaque/internal/kem"
 	"github.com/bytemare/opaque/internal/ksf"
 )
 
@@ -149,6 +150,7 @@ type clientInputs struct {
 	EnvelopeNonce  []byte
 	KDFSalt        []byte
 	AKENonce       []byte
+	KEMSeed        []byte
 }
 
 func newClientInputs(conf *internal.Configuration) *clientInputs {
@@ -161,6 +163,46 @@ func newClientInputs(conf *internal.Configuration) *clientInputs {
 		KSF:            ksf.NewParameters(conf.OPRF.Group().ElementLength()),
 		AKENonce:       nil,
 		EnvelopeNonce:  nil,
+		KEMSeed:        nil,
+	}
+}
+
+// resolveKE1KEMSeed returns the KEM seed for a new KE1 in hybrid mode: the one provided in options, or a fresh one.
+func (c *Client) resolveKE1KEMSeed(options *AKEOptions) ([]byte, error) {
+	if !c.conf.KEM.Enabled() {
+		return nil, nil
+	}
+
+	if options == nil || len(options.KEMSeed) == 0 {
+		return internal.RandomBytes(kem.SeedSize), nil
+	}
+
+	if len(options.KEMSeed) != kem.SeedSize {
+		return nil, ErrClientOptions.Join(internal.ErrInvalidKEMSeed)
+	}
+
+	return slices.Clone(options.KEMSeed), nil
+}
+
+// resolveKE3KEMSeed returns the KEM seed to finalize the AKE in hybrid mode, from the client state or the options.
+func (c *Client) resolveKE3KEMSeed(options *AKEOptions) ([]byte, error) {
+	if !c.conf.KEM.Enabled() {
+		return nil, nil
+	}
+
+	hasOption := options != nil && len(options.KEMSeed) != 0
+
+	switch {
+	case len(c.ake.kemSeed) != 0 && hasOption:
+		return nil, ErrClientOptions.Join(internal.ErrClientExistingKEMSeed)
+	case len(c.ake.kemSeed) != 0:
+		return c.ake.kemSeed, nil
+	case !hasOption:
+		return nil, ErrClientOptions.Join(internal.ErrClientNoKEMSeed)
+	case len(options.KEMSeed) != kem.SeedSize:
+		return nil, ErrClientOptions.Join(internal.ErrInvalidKEMSeed)
+	default:
+		return options.KEMSeed, nil
 	}
 }
 
@@ -286,7 +328,10 @@ func (c *Client) resolveRegistrationFinalizeInputs(options []*ClientOptions) (*c
 func (c *Client) resolveKE1Inputs(options []*ClientOptions) (*clientInputs, error) {
 	inputs := newClientInputs(c.conf)
 
+	var err error
+
 	if len(options) == 0 || options[0] == nil {
+		inputs.KEMSeed, _ = c.resolveKE1KEMSeed(nil) // never fails without options.
 		c.ake.SecretKeyShare = c.conf.MakeSecretKeyShare(nil)
 		inputs.AKENonce = internal.RandomBytes(internal.NonceLength)
 
@@ -294,9 +339,13 @@ func (c *Client) resolveKE1Inputs(options []*ClientOptions) (*clientInputs, erro
 	}
 
 	// OPRF Blind.
-	var err error
-
 	inputs.OPRFBlind, err = c.validateOPRFBlindOption(options[0].OPRFBlind)
+	if err != nil {
+		return nil, err
+	}
+
+	// KEM seed (hybrid mode only).
+	inputs.KEMSeed, err = c.resolveKE1KEMSeed(options[0].AKE)
 	if err != nil {
 		return nil, err
 	}
@@ -337,8 +386,13 @@ func (c *Client) resolveKE3StateInputs(inputs *clientInputs) (*clientInputs, err
 		return nil, ErrClientOptions.Join(internal.ErrKE1Missing)
 	}
 
+	if c.conf.KEM.Enabled() && len(c.ake.kemSeed) == 0 {
+		return nil, ErrClientOptions.Join(internal.ErrClientNoKEMSeed)
+	}
+
 	inputs.SecretKeyShare = c.ake.SecretKeyShare
 	inputs.KE1 = c.ake.ke1
+	inputs.KEMSeed = c.ake.kemSeed
 
 	return inputs, nil
 }
@@ -377,6 +431,12 @@ func (c *Client) resolveKE3Inputs(options []*ClientOptions) (*clientInputs, erro
 	inputs.SecretKeyShare, err = c.parseOptionsKE3ESK(options[0].AKE)
 	if err != nil {
 		return nil, ErrClientOptions.Join(err)
+	}
+
+	// KEM seed (hybrid mode only).
+	inputs.KEMSeed, err = c.resolveKE3KEMSeed(options[0].AKE)
+	if err != nil {
+		return nil, err
 	}
 
 	return inputs, nil

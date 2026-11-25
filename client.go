@@ -41,6 +41,7 @@ type oprfState struct {
 type akeState struct {
 	SecretKeyShare *ecc.Scalar // SecretKeyShare is the ephemeral secret key share used in the authentication phase.
 	ke1            []byte      // KE1 message serialized, used in the authentication phase.
+	kemSeed        []byte      // kemSeed derives the ephemeral KEM decapsulation key in hybrid mode.
 }
 
 // NewClient returns a new Client instantiation given the application Configuration.
@@ -152,8 +153,20 @@ func (c *Client) GenerateKE1(password []byte, options ...*ClientOptions) (*messa
 		return nil, err
 	}
 
+	var kemKey []byte
+
+	if c.conf.KEM.Enabled() {
+		kemKey, err = c.conf.KEM.EncapsulationKey(inputs.KEMSeed)
+		if err != nil { // never reached, as the seed length is validated beforehand.
+			internal.ClearScalar(&c.ake.SecretKeyShare)
+			return nil, ErrClientOptions.Join(internal.ErrInvalidKEMSeed, err)
+		}
+
+		c.ake.kemSeed = inputs.KEMSeed
+	}
+
 	m := c.startOPRF(password, inputs.OPRFBlind)
-	ke1 := ake.Start(c.conf.Group, c.ake.SecretKeyShare, inputs.AKENonce)
+	ke1 := ake.Start(c.conf.Group, c.ake.SecretKeyShare, inputs.AKENonce, kemKey)
 	ke1.BlindedMessage = m
 	c.ake.ke1 = ke1.Serialize()
 
@@ -203,6 +216,18 @@ func (c *Client) GenerateKE3(
 		return nil, nil, nil, ErrAuthentication.Join(err)
 	}
 
+	// Hybrid mode: recover the post-quantum shared secret.
+	var kemSecret []byte
+
+	if c.conf.KEM.Enabled() {
+		kemSecret, err = c.conf.KEM.Decapsulate(inputs.KEMSeed, ke2.ServerKEMCiphertext)
+		if err != nil { // never reached, as the seed and ciphertext lengths are validated beforehand.
+			return nil, nil, nil, ErrKE2.Join(internal.ErrInvalidServerKEMCiphertext, err)
+		}
+
+		defer internal.ClearSlice(&kemSecret)
+	}
+
 	// Finalize the AKE.
 	identities := ake.SetIdentities(clientIdentity, clientPublicKey, serverIdentity, serverPublicKeyBytes)
 
@@ -214,6 +239,7 @@ func (c *Client) GenerateKE3(
 		serverPublicKey,
 		ke2,
 		inputs.KE1,
+		kemSecret,
 	)
 	if !macOK {
 		return nil, nil, nil, ErrAuthentication.Join(
@@ -251,9 +277,14 @@ func (c *Client) ClearState() {
 		internal.ClearSlice(&c.ake.ke1)
 	}
 
+	if len(c.ake.kemSeed) > 0 {
+		internal.ClearSlice(&c.ake.kemSeed)
+	}
+
 	c.ake = akeState{
 		SecretKeyShare: nil,
 		ke1:            nil,
+		kemSeed:        nil,
 	} // clear the AKE state reference.
 }
 
@@ -357,6 +388,10 @@ func (c *Client) validateKE2(ke2 *message.KE2) error {
 
 	if isAllZeros(ke2.ServerMac) {
 		return ErrKE2.Join(internal.ErrMissingMAC, internal.ErrSliceIsAllZeros)
+	}
+
+	if len(ke2.ServerKEMCiphertext) != c.conf.Sizes.KEMCiphertext {
+		return ErrKE2.Join(internal.ErrInvalidServerKEMCiphertext, internal.ErrInvalidEncodingLength)
 	}
 
 	return nil

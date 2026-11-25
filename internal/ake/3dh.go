@@ -68,19 +68,22 @@ func k3dh(
 	s2 *ecc.Scalar,
 	p3 *ecc.Element,
 	s3 *ecc.Scalar,
+	kemSecret []byte,
 ) []byte {
 	e1 := diffieHellman(s1, p1).Encode()
 	e2 := diffieHellman(s2, p2).Encode()
 	e3 := diffieHellman(s3, p3).Encode()
 
-	return encoding.Concat3(e1, e2, e3)
+	// In hybrid mode, the post-quantum KEM shared secret is appended to the 3DH input keying material, so the derived
+	// keys remain secret as long as either the DH group or the KEM is unbroken. kemSecret is empty in classical mode.
+	return encoding.Concat(encoding.Concat3(e1, e2, e3), kemSecret)
 }
 
 func core3DH(
 	conf *internal.Configuration, identities *Identities, ikm, ke1 []byte, ke2 *message.KE2,
 ) (sessionSecret, macS, macC []byte) {
 	h := conf.NewHash()
-	preamble := initTranscript(h, identities, conf.Context, ke1, ke2)
+	preamble := initTranscript(h, conf.VersionTag(), identities, conf.Context, ke1, ke2)
 	serverMacKey, clientMacKey, sessionSecret := deriveKeys(conf.KDF, ikm, preamble)
 	serverMac := conf.MAC.MAC(serverMacKey, preamble)
 	h.Write(serverMac)
@@ -109,9 +112,12 @@ func deriveSecret(h *internal.KDF, secret, label, context []byte) []byte {
 
 // initTranscript initializes the transcript by adding the following values to the running hash state in h and returns
 // the current hash output:
-// Version || Context || ClientIdentity || KE1 || ServerIdentity || CredentialResponse || ServerNonce || ServerKeyShare.
-func initTranscript(h *internal.Hash, identities *Identities, context, ke1 []byte, ke2 *message.KE2) []byte {
-	h.Write([]byte(tag.VersionTag))
+// Version || Context || ClientIdentity || KE1 || ServerIdentity || CredentialResponse || ServerNonce || ServerKeyShare
+// [|| ServerKEMCiphertext]. In hybrid mode, KE1 includes the client KEM key and the KEM ciphertext is appended.
+func initTranscript(
+	h *internal.Hash, version []byte, identities *Identities, context, ke1 []byte, ke2 *message.KE2,
+) []byte {
+	h.Write(version)
 	h.Write(encoding.EncodeVector(context))
 	h.Write(encoding.EncodeVector(identities.ClientIdentity))
 	h.Write(ke1)
@@ -119,6 +125,10 @@ func initTranscript(h *internal.Hash, identities *Identities, context, ke1 []byt
 	h.Write(ke2.CredentialResponse.Serialize())
 	h.Write(ke2.ServerNonce)
 	h.Write(ke2.ServerKeyShare.Encode())
+
+	if len(ke2.ServerKEMCiphertext) != 0 {
+		h.Write(ke2.ServerKEMCiphertext)
+	}
 
 	return h.Sum()
 }

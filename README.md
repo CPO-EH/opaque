@@ -41,6 +41,50 @@ comes with no warranty.
 
 You can find the documentation and usage examples in [the package doc](https://pkg.go.dev/github.com/bytemare/opaque).
 
+## Hybrid post-quantum AKE (3DH + ML-KEM)
+
+This fork adds an optional hybrid key exchange: an ephemeral
+[ML-KEM](https://doi.org/10.6028/NIST.FIPS.203) (FIPS 203) exchange is combined
+with 3DH, so session keys stay secret as long as **either** the elliptic curve
+group **or** ML-KEM is unbroken. This protects recorded traffic against a future
+quantum adversary ("harvest now, decrypt later").
+
+```go
+conf := opaque.DefaultHybridConfiguration() // Ristretto255 + ML-KEM-768
+// or: conf.KEM = opaque.MLKEM768 / opaque.MLKEM1024 on any configuration
+```
+
+How it works:
+
+- KE1 carries the client's ephemeral ML-KEM encapsulation key, appended after
+  the client key share.
+- KE2 carries the server's ML-KEM ciphertext, placed between the server key
+  share and the server MAC.
+- The KEM shared secret is appended to the 3DH input keying material:
+  `IKM = DH1 || DH2 || DH3 || ss_KEM`.
+- The ciphertext is added to the transcript, which also covers the KEM key since
+  KE1 is hashed. The transcript prefix becomes
+  `OPAQUEv1-Hybrid-ML-KEM-768-`, which keeps it separate from RFC 9807.
+- Registration and stored records are unchanged, because the KEM is purely
+  ephemeral. Existing records work in hybrid mode.
+- Message overhead is +1184 B for KE1 and +1088 B for KE2 (ML-KEM-768), or
+  +1568 B for each with ML-KEM-1024.
+- To resume a login on another client instance, also pass
+  `AKEOptions.KEMSeed`, the 64-byte seed of the ephemeral decapsulation key.
+
+Limitations (read before deploying):
+
+- **Not RFC 9807.** Hybrid peers cannot talk to RFC 9807 implementations or to
+  classical peers. Both sides need the same `KEM` setting.
+- **Authentication is still classical.** A quantum adversary active *during*
+  a login could impersonate the server using its static DH key. Mutual
+  authentication still relies on the static DH keys and the MACs.
+- **The OPRF is still classical.** A quantum adversary that sees a login
+  transcript and holds or recovers the server's OPRF key could run an offline
+  dictionary attack on the password. Replacing the OPRF with a post-quantum one
+  is future work.
+- The construction has not been formally analyzed or audited.
+
 ## Security and Operational Notes
 
 - Use a confidential transport (e.g., TLS 1.3+) to protect client identities on

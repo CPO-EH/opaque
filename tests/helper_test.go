@@ -25,6 +25,7 @@ import (
 	"github.com/bytemare/opaque/internal"
 	"github.com/bytemare/opaque/internal/encoding"
 	"github.com/bytemare/opaque/internal/envelope"
+	"github.com/bytemare/opaque/internal/kem"
 	"github.com/bytemare/opaque/internal/tag"
 	"github.com/bytemare/opaque/message"
 
@@ -98,7 +99,7 @@ func toInternal(c *opaque.Configuration) (*internal.Configuration, error) {
 		ksfid = internalKSF.IdentityKSF(0)
 	}
 
-	return internal.NewConfiguration(
+	conf := internal.NewConfiguration(
 		c.OPRF.OPRF(),
 		c.AKE.Group(),
 		ksfid,
@@ -106,7 +107,10 @@ func toInternal(c *opaque.Configuration) (*internal.Configuration, error) {
 		c.MAC,
 		c.Hash,
 		c.Context,
-	), nil
+	)
+	conf.EnableKEM(kem.ID(c.KEM))
+
+	return conf, nil
 }
 
 func mixedGroupConfiguration() *opaque.Configuration {

@@ -147,7 +147,10 @@ func (s *Server) GenerateKE2(
 	defer internal.ClearScalar(&inputs.ClientOPRFKey)
 	defer internal.ClearScalar(&inputs.SecretKeyShare)
 
-	ke2, output := s.coreGenerateKE2(ke1, record, inputs)
+	ke2, output, err := s.coreGenerateKE2(ke1, record, inputs)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	return ke2, output, nil
 }
@@ -206,7 +209,7 @@ func (s *Server) coreGenerateKE2(
 	ke1 *message.KE1,
 	record *ClientRecord,
 	inputs *serverInputs,
-) (*message.KE2, *ServerOutput) {
+) (*message.KE2, *ServerOutput, error) {
 	response := s.credentialResponse(ke1.BlindedMessage,
 		record.RegistrationRecord, inputs.MaskingNonce, s.ServerKeyMaterial.PublicKeyBytes, inputs.ClientOPRFKey)
 
@@ -224,6 +227,20 @@ func (s *Server) coreGenerateKE2(
 		ServerMac:          nil,
 	}
 
+	// Hybrid mode: encapsulate a fresh post-quantum shared secret to the client's ephemeral KEM key.
+	var kemSecret []byte
+
+	if s.conf.KEM.Enabled() {
+		var err error
+
+		kemSecret, ke2.ServerKEMCiphertext, err = s.conf.KEM.Encapsulate(ke1.ClientKEMKey)
+		if err != nil { // never reached, since validateKE1 already verified the key.
+			return nil, nil, ErrKE1.Join(internal.ErrInvalidClientKEMKey, err)
+		}
+
+		defer internal.ClearSlice(&kemSecret)
+	}
+
 	clientMac, sessionSecret := ake.Respond(
 		s.conf,
 		s.ServerKeyMaterial.PrivateKey,
@@ -232,12 +249,13 @@ func (s *Server) coreGenerateKE2(
 		record.ClientPublicKey,
 		ke2,
 		ke1,
+		kemSecret,
 	)
 
 	return ke2, &ServerOutput{
 		ClientMAC:     clientMac,
 		SessionSecret: sessionSecret,
-	}
+	}, nil
 }
 
 // chooseOPRFKey chooses the OPRF key to use for the client. If the clientOPRFKey is provided, it will be used directly.
@@ -393,6 +411,18 @@ func (s *Server) validateKE1(ke1 *message.KE1) error {
 
 	if len(ke1.ClientNonce) == 0 {
 		return ErrKE1.Join(internal.ErrMissingNonce)
+	}
+
+	if !s.conf.KEM.Enabled() {
+		if len(ke1.ClientKEMKey) != 0 {
+			return ErrKE1.Join(internal.ErrInvalidClientKEMKey, internal.ErrInvalidEncodingLength)
+		}
+
+		return nil
+	}
+
+	if err := s.conf.KEM.ValidateEncapsulationKey(ke1.ClientKEMKey); err != nil {
+		return ErrKE1.Join(internal.ErrInvalidClientKEMKey, err)
 	}
 
 	return nil
