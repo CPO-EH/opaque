@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// Copyright (C) 2020-2025 Daniel Bourdrez. All Rights Reserved.
+// Copyright (C) 2026 CPO-EH. All Rights Reserved.
 //
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree or at
@@ -12,9 +12,7 @@ import (
 	"bytes"
 	"crypto/hkdf"
 	"crypto/hmac"
-	"crypto/sha512"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"testing"
@@ -25,6 +23,7 @@ import (
 	"github.com/bytemare/opaque/internal/encoding"
 	"github.com/bytemare/opaque/internal/kem"
 	"github.com/bytemare/opaque/internal/oprf"
+	"github.com/bytemare/opaque/message"
 )
 
 // Hybrid mode test vectors.
@@ -36,11 +35,13 @@ import (
 //   - hybridKeySchedule recomputes the AKE from the specification (docs/hybrid-mlkem.md) using only the Go standard
 //     library for HKDF, HMAC and hashing, so the specification, the vectors and the code must all agree.
 //
-// Regenerate with: go test ./tests -run TestHybridVectors -update-hybrid-vectors
+// The server's encapsulation randomness can only be fixed in builds with the opaque_kat tag. Without the tag, this
+// file checks the registration, the client side of the login and the key schedule. With the tag,
+// hybrid_vectors_kat_test.go also reproduces KE2 and can regenerate the file:
+//
+//	go test -tags opaque_kat ./tests -run TestHybridVectors -update-hybrid-vectors
 
 const hybridVectorsFile = "hybrid_vectors.json"
-
-var updateHybridVectors = flag.Bool("update-hybrid-vectors", false, "regenerate "+hybridVectorsFile)
 
 type hybridConfig struct {
 	Name    string    `json:"Name"`
@@ -108,12 +109,6 @@ type hybridVector struct {
 	Outputs       hybridOutputs       `json:"outputs"`
 }
 
-// fixedBytes returns n reproducible bytes for a named vector input.
-func fixedBytes(label string, n int) []byte {
-	h := sha512.Sum512([]byte("OPAQUE hybrid test vector " + label))
-	return h[:n]
-}
-
 func (v *hybridVector) configuration() *opaque.Configuration {
 	k := opaque.MLKEM768
 	if v.Config.KEM == opaque.MLKEM1024.String() {
@@ -132,12 +127,12 @@ func (v *hybridVector) configuration() *opaque.Configuration {
 	}
 }
 
-// run executes registration and login with the library from the vector inputs and fills in the outputs and the
-// observable intermediates.
-func (v *hybridVector) run(t *testing.T) {
+// parties returns a client and a server set up with the vector configuration and server keys.
+func (v *hybridVector) parties(t *testing.T) (*opaque.Configuration, *opaque.Client, *opaque.Server) {
 	t.Helper()
 
 	conf := v.configuration()
+
 	client, err := conf.Client()
 	if err != nil {
 		t.Fatal(err)
@@ -162,18 +157,32 @@ func (v *hybridVector) run(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	decodeBlind := func(b []byte) *ecc.Scalar {
-		s := conf.OPRF.Group().NewScalar()
-		if err := s.Decode(b); err != nil {
-			t.Fatal(err)
-		}
+	return conf, client, server
+}
 
-		return s
+func decodeBlind(t *testing.T, conf *opaque.Configuration, b []byte) *ecc.Scalar {
+	t.Helper()
+
+	s := conf.OPRF.Group().NewScalar()
+	if err := s.Decode(b); err != nil {
+		t.Fatal(err)
 	}
 
-	// Registration.
+	return s
+}
+
+// register runs the registration from the vector inputs, fills in the registration outputs and intermediates, and
+// returns the client record.
+func (v *hybridVector) register(
+	t *testing.T,
+	conf *opaque.Configuration,
+	client *opaque.Client,
+	server *opaque.Server,
+) *opaque.ClientRecord {
+	t.Helper()
+
 	req, err := client.RegistrationInit(v.Inputs.Password,
-		&opaque.ClientOptions{OPRFBlind: decodeBlind(v.Inputs.BlindRegistration)})
+		&opaque.ClientOptions{OPRFBlind: decodeBlind(t, conf, v.Inputs.BlindRegistration)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,9 +200,27 @@ func (v *hybridVector) run(t *testing.T) {
 
 	client.ClearState()
 
-	// Login.
+	v.Outputs.RegistrationRequest = req.Serialize()
+	v.Outputs.RegistrationResponse = resp.Serialize()
+	v.Outputs.RegistrationRecord = record.Serialize()
+	v.Outputs.ExportKey = exportKey
+	v.Intermediates.ClientPublicKey = record.ClientPublicKey.Encode()
+	v.Intermediates.MaskingKey = record.MaskingKey
+	v.Intermediates.Envelope = record.Envelope
+
+	return &opaque.ClientRecord{
+		RegistrationRecord:   record,
+		CredentialIdentifier: v.Inputs.CredentialIdentifier,
+		ClientIdentity:       v.Inputs.ClientIdentity,
+	}
+}
+
+// startLogin generates KE1 from the vector inputs and fills in the matching output and intermediate.
+func (v *hybridVector) startLogin(t *testing.T, conf *opaque.Configuration, client *opaque.Client) *message.KE1 {
+	t.Helper()
+
 	ke1, err := client.GenerateKE1(v.Inputs.Password, &opaque.ClientOptions{
-		OPRFBlind: decodeBlind(v.Inputs.BlindLogin),
+		OPRFBlind: decodeBlind(t, conf, v.Inputs.BlindLogin),
 		AKE: &opaque.AKEOptions{
 			SecretKeyShareSeed: v.Inputs.ClientKeyshareSeed,
 			Nonce:              v.Inputs.ClientNonce,
@@ -204,54 +231,112 @@ func (v *hybridVector) run(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ke2, serverOutput, err := server.GenerateKE2(ke1, &opaque.ClientRecord{
-		RegistrationRecord:   record,
-		CredentialIdentifier: v.Inputs.CredentialIdentifier,
-		ClientIdentity:       v.Inputs.ClientIdentity,
-	}, &opaque.ServerOptions{
+	v.Outputs.KE1 = ke1.Serialize()
+	v.Intermediates.ClientKEMPublicKey = ke1.ClientKEMKey
+
+	return ke1
+}
+
+// serverKE2 generates KE2 with the fixed server inputs of the vector. The KEM ciphertext is only reproducible when
+// the encapsulation randomness has been fixed, which requires the opaque_kat build tag.
+func (v *hybridVector) serverKE2(
+	t *testing.T,
+	server *opaque.Server,
+	ke1 *message.KE1,
+	record *opaque.ClientRecord,
+) (*message.KE2, *opaque.ServerOutput) {
+	t.Helper()
+
+	ke2, output, err := server.GenerateKE2(ke1, record, &opaque.ServerOptions{
 		MaskingNonce: v.Inputs.MaskingNonce,
 		AKE: &opaque.AKEOptions{
 			SecretKeyShareSeed: v.Inputs.ServerKeyshareSeed,
 			Nonce:              v.Inputs.ServerNonce,
-			KEMRandomness:      v.Inputs.ServerKEMRandomness,
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ke3, sessionKey, loginExportKey, err := client.GenerateKE3(ke2, v.Inputs.ClientIdentity, v.Inputs.ServerIdentity)
+	return ke2, output
+}
+
+// finishLogin runs KE3 on the client and fills in the remaining outputs.
+func (v *hybridVector) finishLogin(t *testing.T, client *opaque.Client, ke2 *message.KE2) *message.KE3 {
+	t.Helper()
+
+	ke3, sessionKey, exportKey, err := client.GenerateKE3(ke2, v.Inputs.ClientIdentity, v.Inputs.ServerIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = server.LoginFinish(ke3, serverOutput.ClientMAC); err != nil {
-		t.Fatal(err)
-	}
-
-	if !bytes.Equal(sessionKey, serverOutput.SessionSecret) {
-		t.Fatal("client and server session keys differ")
-	}
-
-	if !bytes.Equal(exportKey, loginExportKey) {
+	if !bytes.Equal(exportKey, v.Outputs.ExportKey) {
 		t.Fatal("registration and login export keys differ")
 	}
 
-	v.Outputs = hybridOutputs{
-		RegistrationRequest:  req.Serialize(),
-		RegistrationResponse: resp.Serialize(),
-		RegistrationRecord:   record.Serialize(),
-		KE1:                  ke1.Serialize(),
-		KE2:                  ke2.Serialize(),
-		KE3:                  ke3.Serialize(),
-		ExportKey:            exportKey,
-		SessionKey:           sessionKey,
-	}
-	v.Intermediates.ClientPublicKey = record.ClientPublicKey.Encode()
-	v.Intermediates.MaskingKey = record.MaskingKey
-	v.Intermediates.Envelope = record.Envelope
-	v.Intermediates.ClientKEMPublicKey = ke1.ClientKEMKey
+	v.Outputs.KE2 = ke2.Serialize()
+	v.Outputs.KE3 = ke3.Serialize()
+	v.Outputs.SessionKey = sessionKey
 	v.Intermediates.KEMCiphertext = ke2.ServerKEMCiphertext
+
+	return ke3
+}
+
+// checkClientSide replays the vector without fixing the encapsulation randomness of the server. The registration,
+// KE1 and the part of KE2 before the KEM ciphertext must be reproduced, a login with the server's own KE2 must
+// succeed, and the client must turn the KE2 of the vector into the KE3 and session key of the vector.
+func (v *hybridVector) checkClientSide(t *testing.T) {
+	t.Helper()
+
+	conf, client, server := v.parties(t)
+	got := &hybridVector{Config: v.Config, Inputs: v.Inputs}
+
+	record := got.register(t, conf, client, server)
+	if !bytes.Equal(got.Outputs.RegistrationRequest, v.Outputs.RegistrationRequest) ||
+		!bytes.Equal(got.Outputs.RegistrationResponse, v.Outputs.RegistrationResponse) ||
+		!bytes.Equal(got.Outputs.RegistrationRecord, v.Outputs.RegistrationRecord) ||
+		!bytes.Equal(got.Outputs.ExportKey, v.Outputs.ExportKey) {
+		t.Fatal("registration differs from the vector")
+	}
+
+	ke1 := got.startLogin(t, conf, client)
+	if !bytes.Equal(got.Outputs.KE1, v.Outputs.KE1) ||
+		!bytes.Equal(got.Intermediates.ClientKEMPublicKey, v.Intermediates.ClientKEMPublicKey) {
+		t.Fatal("KE1 differs from the vector")
+	}
+
+	// The server's own KE2 matches the vector up to the KEM ciphertext, and completes a login.
+	ke2, output := got.serverKE2(t, server, ke1, record)
+	kemStart := len(v.Outputs.KE2) - len(v.Intermediates.KEMCiphertext) - len(v.Outputs.KE3)
+
+	if !bytes.Equal(ke2.Serialize()[:kemStart], v.Outputs.KE2[:kemStart]) {
+		t.Fatal("KE2 differs from the vector before the KEM ciphertext")
+	}
+
+	live := &hybridVector{Config: v.Config, Inputs: v.Inputs, Outputs: got.Outputs}
+	_, liveClient, _ := v.parties(t)
+	live.startLogin(t, conf, liveClient)
+
+	ke3 := live.finishLogin(t, liveClient, ke2)
+	if err := server.LoginFinish(ke3, output.ClientMAC); err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(live.Outputs.SessionKey, output.SessionSecret) {
+		t.Fatal("client and server session keys differ")
+	}
+
+	// The client turns the KE2 of the vector into the KE3 and session key of the vector.
+	vectorKE2, err := client.Deserialize.KE2(v.Outputs.KE2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got.finishLogin(t, client, vectorKE2)
+
+	if !bytes.Equal(got.Outputs.KE3, v.Outputs.KE3) || !bytes.Equal(got.Outputs.SessionKey, v.Outputs.SessionKey) {
+		t.Fatal("client login differs from the vector")
+	}
 }
 
 // hybridKeySchedule recomputes the hybrid AKE of the specification, from the server's point of view, using the vector
@@ -286,19 +371,14 @@ func (v *hybridVector) hybridKeySchedule(t *testing.T) (serverMac, clientMac, se
 		t.Fatal("unexpected KEM field sizes")
 	}
 
-	// KEM: the server encapsulates with the fixed randomness, the client decapsulates with its seed.
-	ss, ctCheck, err := kemID.EncapsulateDerand(ek, v.Inputs.ServerKEMRandomness)
+	// KEM: the client's seed gives the encapsulation key of KE1, and decapsulating the ciphertext gives the secret.
+	if ekCheck, err := kemID.EncapsulationKey(v.Inputs.ClientKEMSeed); err != nil || !bytes.Equal(ek, ekCheck) {
+		t.Fatal("KEM encapsulation key does not match the client seed")
+	}
+
+	ss, err := kemID.Decapsulate(v.Inputs.ClientKEMSeed, ct)
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	if !bytes.Equal(ct, ctCheck) {
-		t.Fatal("KEM ciphertext does not match the derandomized encapsulation")
-	}
-
-	ssClient, err := kemID.Decapsulate(v.Inputs.ClientKEMSeed, ct)
-	if err != nil || !bytes.Equal(ss, ssClient) {
-		t.Fatal("KEM decapsulation does not match encapsulation")
 	}
 
 	// Diffie-Hellman, from the server's keys.
@@ -428,104 +508,8 @@ func (v *hybridVector) checkKeySchedule(t *testing.T) {
 	}
 }
 
-func loadRFCVectors(t *testing.T) []*vector {
+func loadHybridVectors(t *testing.T) []*hybridVector {
 	t.Helper()
-
-	contents, err := os.ReadFile("vectors.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var v []*vector
-	if err = json.Unmarshal(contents, &v); err != nil {
-		t.Fatal(err)
-	}
-
-	return v
-}
-
-func generateHybridVectors(t *testing.T) []*hybridVector {
-	t.Helper()
-
-	var out []*hybridVector
-
-	for _, rfc := range loadRFCVectors(t) {
-		// curve25519 is not supported by this implementation.
-		if isFake(rfc.Config.Fake) || rfc.Config.Group == "curve25519" {
-			continue
-		}
-
-		for _, k := range []opaque.KEM{opaque.MLKEM768, opaque.MLKEM1024} {
-			kemID := kem.ID(k)
-			v := &hybridVector{
-				Config: hybridConfig{
-					Name:    "3DH-" + k.String(),
-					OPRF:    string(rfc.Config.OPRF),
-					Group:   rfc.Config.Group,
-					KEM:     k.String(),
-					KSF:     rfc.Config.KSF,
-					KDF:     rfc.Config.KDF,
-					MAC:     rfc.Config.MAC,
-					Hash:    rfc.Config.Hash,
-					Context: rfc.Config.Context,
-					Nek:     kemID.EncapsulationKeySize(),
-					Nct:     kemID.CiphertextSize(),
-				},
-				Inputs: hybridInputs{
-					OprfSeed:             rfc.Inputs.OprfSeed,
-					CredentialIdentifier: rfc.Inputs.CredentialIdentifier,
-					Password:             rfc.Inputs.Password,
-					ClientIdentity:       rfc.Inputs.ClientIdentity,
-					ServerIdentity:       rfc.Inputs.ServerIdentity,
-					ServerPrivateKey:     rfc.Inputs.ServerPrivateKey,
-					ServerPublicKey:      rfc.Inputs.ServerPublicKey,
-					BlindRegistration:    rfc.Inputs.BlindRegistration,
-					EnvelopeNonce:        rfc.Inputs.EnvelopeNonce,
-					BlindLogin:           rfc.Inputs.BlindLogin,
-					ClientNonce:          rfc.Inputs.ClientNonce,
-					ClientKeyshareSeed:   rfc.Inputs.ClientKeyshareSeed,
-					ClientKEMSeed:        fixedBytes("client_kem_seed", kem.SeedSize),
-					MaskingNonce:         rfc.Inputs.MaskingNonce,
-					ServerNonce:          rfc.Inputs.ServerNonce,
-					ServerKeyshareSeed:   rfc.Inputs.ServerKeyshareSeed,
-					ServerKEMRandomness:  fixedBytes("server_kem_randomness", kem.EncapsulationRandomnessSize),
-				},
-			}
-
-			v.run(t)
-			v.checkKeySchedule(t)
-
-			// Registration is unchanged by the KEM: it must match the RFC vector.
-			if !bytes.Equal(v.Outputs.RegistrationRecord, rfc.Outputs.RegistrationRecord) ||
-				!bytes.Equal(v.Outputs.ExportKey, rfc.Outputs.ExportKey) {
-				t.Fatal("hybrid registration differs from RFC 9807")
-			}
-
-			out = append(out, v)
-		}
-	}
-
-	return out
-}
-
-// TestHybridVectors checks the hybrid mode test vectors, or regenerates them with -update-hybrid-vectors.
-func TestHybridVectors(t *testing.T) {
-	if *updateHybridVectors {
-		vectors := generateHybridVectors(t)
-
-		contents, err := json.MarshalIndent(vectors, "", "  ")
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if err = os.WriteFile(hybridVectorsFile, append(contents, '\n'), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		t.Logf("wrote %d vectors to %s", len(vectors), hybridVectorsFile)
-
-		return
-	}
 
 	contents, err := os.ReadFile(hybridVectorsFile)
 	if err != nil {
@@ -541,22 +525,16 @@ func TestHybridVectors(t *testing.T) {
 		t.Fatal("no hybrid vectors")
 	}
 
-	for i, want := range vectors {
-		t.Run(fmt.Sprintf("%d-%s-%s", i, want.Config.OPRF, want.Config.KEM), func(t *testing.T) {
-			// The library must reproduce every output and intermediate from the inputs.
-			got := &hybridVector{Config: want.Config, Inputs: want.Inputs}
-			got.run(t)
-			got.checkKeySchedule(t)
+	return vectors
+}
 
-			gotJSON, _ := json.Marshal(got)
-			wantJSON, _ := json.Marshal(want)
-
-			if !bytes.Equal(gotJSON, wantJSON) {
-				t.Fatalf("vector mismatch\nwant %s\ngot  %s", wantJSON, gotJSON)
-			}
-
-			// The specification recomputation must also hold on the stored values alone.
-			want.checkKeySchedule(t)
+// TestHybridVectors checks the hybrid mode test vectors on the client side and against the key schedule of the
+// specification. Builds with the opaque_kat tag also run TestHybridVectorsKAT, which reproduces them in full.
+func TestHybridVectors(t *testing.T) {
+	for i, v := range loadHybridVectors(t) {
+		t.Run(fmt.Sprintf("%d-%s-%s", i, v.Config.OPRF, v.Config.KEM), func(t *testing.T) {
+			v.checkClientSide(t)
+			v.checkKeySchedule(t)
 		})
 	}
 }

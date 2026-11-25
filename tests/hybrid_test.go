@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// Copyright (C) 2020-2025 Daniel Bourdrez. All Rights Reserved.
+// Copyright (C) 2026 CPO-EH. All Rights Reserved.
 //
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree or at
@@ -166,8 +166,8 @@ func TestHybrid_FullFlow(t *testing.T) {
 // TestHybrid_DefaultConfiguration verifies the default hybrid configuration (with Argon2id) works end to end.
 func TestHybrid_DefaultConfiguration(t *testing.T) {
 	conf := opaque.DefaultHybridConfiguration()
-	if conf.KEM != opaque.MLKEM768 {
-		t.Fatal("default hybrid configuration must use ML-KEM-768")
+	if conf.KEM != opaque.MLKEM1024 {
+		t.Fatal("default hybrid configuration must use ML-KEM-1024")
 	}
 
 	env := newHybridEnv(t, conf)
@@ -431,38 +431,6 @@ func TestHybrid_KE1InvalidKEMSeedOption(t *testing.T) {
 	}
 }
 
-// TestHybrid_KEMRandomnessOption verifies the server rejects derandomized encapsulation input of the wrong length, and
-// that a fixed randomness makes KE2 reproducible.
-func TestHybrid_KEMRandomnessOption(t *testing.T) {
-	conf := hybridConf(opaque.DefaultConfiguration(), opaque.MLKEM768)
-	env := newHybridEnv(t, conf)
-	client, _ := conf.Client()
-	ke1, _ := client.GenerateKE1(password)
-
-	_, _, err := env.server.GenerateKE2(ke1, env.record, &opaque.ServerOptions{
-		AKE: &opaque.AKEOptions{KEMRandomness: make([]byte, 31)},
-	})
-	if !errors.Is(err, internal.ErrInvalidKEMRandomness) {
-		t.Fatalf("expected invalid KEM randomness error, got %v", err)
-	}
-
-	opts := &opaque.ServerOptions{AKE: &opaque.AKEOptions{KEMRandomness: bytes.Repeat([]byte{7}, 32)}}
-
-	a, _, err := env.server.GenerateKE2(ke1, env.record, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	b, _, err := env.server.GenerateKE2(ke1, env.record, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !bytes.Equal(a.ServerKEMCiphertext, b.ServerKEMCiphertext) {
-		t.Fatal("fixed KEM randomness must give the same ciphertext")
-	}
-}
-
 // TestHybrid_ClearState verifies ClearState wipes the KEM seed, so KE3 cannot be computed afterwards.
 func TestHybrid_ClearState(t *testing.T) {
 	conf := hybridConf(opaque.DefaultConfiguration(), opaque.MLKEM768)
@@ -489,7 +457,7 @@ func TestHybrid_ConfigurationSerialization(t *testing.T) {
 	hybrid := opaque.DefaultHybridConfiguration()
 
 	cs, hs := classic.Serialize(), hybrid.Serialize()
-	if len(hs) != len(cs)+1 || hs[len(hs)-1] != byte(opaque.MLKEM768) || !bytes.Equal(cs, hs[:len(cs)]) {
+	if len(hs) != len(cs)+1 || hs[len(hs)-1] != byte(opaque.MLKEM1024) || !bytes.Equal(cs, hs[:len(cs)]) {
 		t.Fatal("unexpected hybrid configuration encoding")
 	}
 

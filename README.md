@@ -74,12 +74,15 @@ dependency is needed.
 ### Usage
 
 ```go
-// Ristretto255, SHA-512, Argon2id and ML-KEM-768.
+// Ristretto255, SHA-512, Argon2id and ML-KEM-1024.
 conf := opaque.DefaultHybridConfiguration()
 
 // Or enable it on any existing configuration.
-conf.KEM = opaque.MLKEM768 // or opaque.MLKEM1024
+conf.KEM = opaque.MLKEM1024 // or opaque.MLKEM768
 ```
+
+The default is ML-KEM-1024 (NIST security category 5), the conservative
+choice. ML-KEM-768 (category 3) saves about 400 bytes in each of KE1 and KE2.
 
 The rest of the API is the same. Client and server must use the same `KEM`
 value. Records created during registration do not change, so users registered
@@ -161,18 +164,22 @@ the server, so every message and key is reproducible. Another implementation
 is compatible if it produces the same bytes. Section 8 of the specification
 describes the format.
 
-`tests/hybrid_vectors_test.go` checks the vectors in two ways: the library
-must reproduce them, and a separate computation of the key schedule written
-from the specification, using only the Go standard library, must agree with
-them. To regenerate the file:
+The vectors are checked in two ways: the library must reproduce them, and a
+separate computation of the key schedule written from the specification,
+using only the Go standard library, must agree with them.
+
+Reproducing KE2 requires fixing the randomness of the server's encapsulation.
+Anyone who knows that value can compute the KEM shared secret, so it cannot be
+set through the public API. It is only possible in builds with the
+`opaque_kat` tag, which regular builds never include. A plain `go test` checks
+the registration, KE1, the client side of the login and the key schedule. With
+the tag, the tests also reproduce KE2 byte for byte and can regenerate the
+file:
 
 ```shell
-go test ./tests -run TestHybridVectors -update-hybrid-vectors
+go test -tags opaque_kat ./tests/...
+go test -tags opaque_kat ./tests -run TestHybridVectors -update-hybrid-vectors
 ```
-
-The server option `AKEOptions.KEMRandomness` exists only to produce these
-vectors. Never set it in production: anyone who knows that value can compute
-the KEM shared secret.
 
 ### Limitations
 

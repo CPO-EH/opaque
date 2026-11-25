@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// Copyright (C) 2020-2025 Daniel Bourdrez. All Rights Reserved.
+// Copyright (C) 2026 CPO-EH. All Rights Reserved.
 //
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree or at
@@ -12,7 +12,6 @@ package kem
 
 import (
 	"crypto/mlkem"
-	"crypto/mlkem/mlkemtest"
 	"errors"
 )
 
@@ -36,9 +35,6 @@ const (
 
 	// SharedSecretSize is the size of the shared secret produced by encapsulation.
 	SharedSecretSize = mlkem.SharedKeySize
-
-	// EncapsulationRandomnessSize is the size of the randomness used by derandomized encapsulation.
-	EncapsulationRandomnessSize = 32
 )
 
 var (
@@ -136,33 +132,11 @@ func (i ID) ValidateEncapsulationKey(ek []byte) error {
 
 // Encapsulate generates a fresh shared secret and its ciphertext for the encapsulation key.
 func (i ID) Encapsulate(ek []byte) (sharedSecret, ciphertext []byte, err error) {
-	switch i {
-	case MLKEM768:
-		k, err := mlkem.NewEncapsulationKey768(ek)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		sharedSecret, ciphertext = k.Encapsulate()
-
-		return sharedSecret, ciphertext, nil
-	case MLKEM1024:
-		k, err := mlkem.NewEncapsulationKey1024(ek)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		sharedSecret, ciphertext = k.Encapsulate()
-
-		return sharedSecret, ciphertext, nil
-	default:
-		return nil, nil, errUnknownKEM
+	// Only builds with the opaque_kat tag can fix the encapsulation randomness, see kat.go.
+	if sharedSecret, ciphertext, ok, err := i.encapsulateKAT(ek); ok {
+		return sharedSecret, ciphertext, err
 	}
-}
 
-// EncapsulateDerand is the derandomized encapsulation (ML-KEM.Encaps_internal in FIPS 203), using the provided 32
-// bytes of randomness. It must only be used to produce or check known-answer test vectors.
-func (i ID) EncapsulateDerand(ek, randomness []byte) (sharedSecret, ciphertext []byte, err error) {
 	switch i {
 	case MLKEM768:
 		k, err := mlkem.NewEncapsulationKey768(ek)
@@ -170,14 +144,18 @@ func (i ID) EncapsulateDerand(ek, randomness []byte) (sharedSecret, ciphertext [
 			return nil, nil, err
 		}
 
-		return mlkemtest.Encapsulate768(k, randomness)
+		sharedSecret, ciphertext = k.Encapsulate()
+
+		return sharedSecret, ciphertext, nil
 	case MLKEM1024:
 		k, err := mlkem.NewEncapsulationKey1024(ek)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		return mlkemtest.Encapsulate1024(k, randomness)
+		sharedSecret, ciphertext = k.Encapsulate()
+
+		return sharedSecret, ciphertext, nil
 	default:
 		return nil, nil, errUnknownKEM
 	}

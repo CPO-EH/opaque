@@ -64,8 +64,8 @@ A configuration of this variant is an RFC 9807 configuration plus one KEM:
 - `Nseed` is the length of the seed from which a key pair is derived.
 
 The identifier value 0 means that no KEM is used, which is plain RFC 9807.
-ML-KEM-768 is RECOMMENDED. ML-KEM-1024 MAY be used where a higher security
-category is required.
+ML-KEM-1024 is RECOMMENDED. ML-KEM-768 MAY be used where message size
+matters more than the security margin.
 
 `KEMName` below is the Name column of the table, as an ASCII string.
 
@@ -330,6 +330,12 @@ Each vector takes all its RFC 9807 inputs from the matching entry of
 Both are the first bytes of `SHA-512("OPAQUE hybrid test vector " || label)`,
 where `label` is the field name, for example `client_kem_seed`. The same two
 values are used in all 8 vectors. They are only fixed for reproducibility.
+
+Reproducing KE2 requires a way to fix `m` on the server. That mechanism must
+not be reachable in production code, since anyone who knows `m` can compute
+the KEM shared secret. This implementation only offers it in builds with the
+`opaque_kat` tag. Without it, the client side can still be checked: KE1, then
+KE3 and the session key computed from the KE2 of the vector.
 
 Each vector is a JSON object with four members.
 
